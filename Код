@@ -1,0 +1,88 @@
+#!pip install flask
+#!pip install requests
+#!pip install cachetools
+
+
+from flask import Flask, request, jsonify
+import requests
+from datetime import datetime
+from cachetools import TTLCache
+
+
+app = Flask(__name__)
+
+# Создание in-memory базы данных для кеширования реферальных кодов
+referral_codes_cache = TTLCache(maxsize=1000, ttl=3600)
+users = []  # Список пользователей
+
+# Регистрация пользователя
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    email = data['email']
+    referral_code = data.get('referral_code')  # Изменение, чтобы referral_code был необязательным
+
+    # Проверка, что пользователь с таким email уже не зарегистрирован
+    if user_exists(email):
+        return jsonify({'message': 'Пользователь с таким адресом электронной почты уже существует'}), 400
+
+    # Проверка, что реферальный код существует и не истек
+    if referral_code and not referral_code_exists(referral_code):
+        return jsonify({'message': 'Неверный реферальный код или код истек'}), 400
+
+    # Получение дополнительной информации о пользователе с помощью clearbit.com
+    user_info = get_user_info(email)
+    if user_info is None:
+        return jsonify({'message': 'Не удалось получить информацию о пользователе'}), 500
+
+    user = {'email': email, 'referral_code': referral_code, 'user_info': user_info}
+    save_user(user)
+
+    return jsonify({'message': 'Пользователь успешно зарегистрирован'})
+
+# Проверка существования пользователя с указанным email
+def user_exists(email):
+    return any(user['email'] == email for user in users)
+
+# Проверка существования реферрального кода и его срока годности
+def referral_code_exists(referral_code):
+    code_data = referral_codes_cache.get(referral_code)
+    if code_data is not None:
+        expiry_date = code_data.get('expiry_date')
+        if expiry_date and datetime.now() < expiry_date:
+            return True
+    return False
+
+# Получение дополнительной информации о пользователе с помощью clearbit.com
+def get_user_info(email):
+    api_key = 'YOUR_CLEARBIT_API_KEY'
+    url = f'https://person.clearbit.com/v2/combined/find?email={email}'
+    headers = {'Authorization': f'Bearer {api_key}'}
+
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        return None
+
+# Сохранение пользователя в базу данных и кеш реферральных кодов
+def save_user(user):
+    users.append(user)
+
+# Получение информации о рефералах по id реферера
+@app.route('/referrals/<int:user_id>', methods=['GET'])
+def get_referrals_by_user_id(user_id):
+    referrals = [user for user in users if user['referral_code'] == user_id]
+    return jsonify({'referrals': referrals})
+
+# Получение реферального кода по email адресу реферера
+@app.route('/referral-code/<string:referrer_email>', methods=['GET'])
+def get_referral_code_by_email(referrer_email):
+    referrer = next((user for user in users if user['email'] == referrer_email), None)
+    if referrer:
+        return jsonify({'referral_code': referrer.get('referral_code', 'Нет реферального кода')})
+    else:
+        return jsonify({'message': 'Пользователь с таким email не найден'}),404
+
+if __name__ == '__main__':
+    app.run(debug=True)
